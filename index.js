@@ -25,13 +25,14 @@ module.exports = Niffy;
 
 function Niffy(base, test, options) {
   if (!(this instanceof Niffy)) return new Niffy(base, test, options);
-  options = defaults(options, { show: false, width: 1400, height: 1000, threshold: .2 });
+  options = defaults(options, { show: false, width: 1400, height: 1000, threshold: .2, imgfiledir: '/tmp/niffy' });
   this.nightmare = new Nightmare(options);
   this.basehost = base;
   this.testhost = test;
   this.starts = {};
   this.profiles = {};
   this.errorThreshold = options.threshold;
+  this.imgfiledir = options.imgfiledir;
 }
 
 /**
@@ -41,8 +42,8 @@ function Niffy(base, test, options) {
  * @param {Function} fn
  */
 
-Niffy.prototype.test = function* (path, fn) {
-  var diff = yield this.capture(path, fn);
+Niffy.prototype.test = async function (path, fn, fn2) {
+  var diff = await this.capture(path, fn, fn2);
   var pct = '' + Math.floor(diff.percentage * 10000) / 10000 + '%';
   var failMessage = sprintf('%s different, open %s', pct, diff.diffFilepath);
   var absolutePct = Math.abs(diff.percentage);
@@ -55,13 +56,15 @@ Niffy.prototype.test = function* (path, fn) {
  * goto a specific path and optionally take some actions.
  *
  * @param {String} path
- * @param {Function} fn
+ * @param {Function} fn to run on base
+ * @param {Function} fn to run on test
  */
 
-Niffy.prototype.goto = function* (path, fn) {
+Niffy.prototype.goto = async function (path, fn, fn2) {
+  var testFn = (typeof fn2 === 'function') ? fn2 : fn;
   this.startProfile('goto');
-  yield this.gotoHost(this.basehost, path, fn);
-  yield this.gotoHost(this.testhost, path, fn);
+  await this.gotoHost(this.basehost, path, fn);
+  await this.gotoHost(this.testhost, path, testFn);
   this.stopProfile('goto');
 };
 
@@ -73,40 +76,52 @@ Niffy.prototype.goto = function* (path, fn) {
  * @param {Function} fn
  */
 
-Niffy.prototype.gotoHost = function* (host, path, fn) {
-  yield this.nightmare.goto(host + path);
+Niffy.prototype.gotoHost = async function (host, path, fn) {
+  var name = (host === this.basehost) ? 'base' : 'test';
+  await this.nightmare.goto(host + path);
   if (fn) {
-    yield timeout(1000);
-    yield fn(this.nightmare);
-    yield timeout(1000);
+    await timeout(1000);
+    await fn(this.nightmare, name);
+    await timeout(1000);
   }
+};
+
+/**
+ * continue with same nightmare state.
+ * 
+ * @param {Function} fn
+ */
+
+Niffy.prototype.continue = async function (fn) {
+  await fn(this.nightmare);
 };
 
 /**
  * capture a specific path after optionally taking some actions.
  *
  * @param {String} path
- * @param {Function} fn
+ * @param {Function} fn to run on base url
+ * @param {Function} fn to run on test url
  */
 
-Niffy.prototype.capture = function* (path, fn) {
-
+Niffy.prototype.capture = async function (path, fn, fn2) {
+  var testFn = (typeof fn2 === 'function') ? fn2 : fn;
   /**
    * Capture the screenshots.
    */
 
-  yield this.captureHost('base', this.basehost, path, fn);
-  yield this.captureHost('test', this.testhost, path, fn);
+  await this.captureHost('base', this.basehost, path, fn);
+  await this.captureHost('test', this.testhost, path, testFn);
 
   /**
    * Run the diff calculation.
    */
 
   this.startProfile('diff');
-  var pathA = imgfilepath('base', path);
-  var pathB = imgfilepath('test', path);
-  var pathDiff = imgfilepath('diff', path);
-  var result = yield diff(pathA, pathB, pathDiff);
+  var pathA = imgfilepath('base', path, this.imgfiledir);
+  var pathB = imgfilepath('test', path, this.imgfiledir);
+  var pathDiff = imgfilepath('diff', path, this.imgfiledir);
+  var result = await diff(pathA, pathB, pathDiff);
   this.stopProfile('diff');
 
   /**
@@ -114,7 +129,7 @@ Niffy.prototype.capture = function* (path, fn) {
    */
 
   result.percentage = result.differences / result.total * 100;
-  result.diffFilepath = imgfilepath('diff', path);
+  result.diffFilepath = imgfilepath('diff', path, this.imgfiledir);
   return result;
 };
 
@@ -127,24 +142,24 @@ Niffy.prototype.capture = function* (path, fn) {
  * @param {Function} fn
  */
 
-Niffy.prototype.captureHost = function* (name, host, path, fn) {
+Niffy.prototype.captureHost = async function (name, host, path, fn) {
 
   this.startProfile('goto');
-  yield this.gotoHost(host, path, fn);
+  await this.gotoHost(host, path, fn);
   this.stopProfile('goto');
 
   this.startProfile('capture');
-  yield this.nightmare.wait(1000).screenshot(imgfilepath(name, path));
+  await this.nightmare.wait(1000).screenshot(imgfilepath(name, path, this.imgfiledir));
   this.stopProfile('capture');
-  yield timeout(250);
+  await timeout(250);
 };
 
 /**
  * End the capture session.
  */
 
-Niffy.prototype.end = function* () {
-  yield this.nightmare.end();
+Niffy.prototype.end = async function () {
+  await this.nightmare.end();
 
   debug(
     'profile\n\tgoto %s\n\tcapture %s\n\tdiff %s',
@@ -182,16 +197,16 @@ Niffy.prototype.stopProfile = function (name) {
  * Utils
  */
 
-function imgfilepath(name, path) {
-  var filepath = '/tmp/niffy' + path;
+function imgfilepath(name, path, imgfiledir) {
+  var filepath = imgfiledir + path;
   if (filepath.slice(-1) !== '/') filepath += '/';
   mkdirp(filepath);
   return (filepath + name + '.png');
 }
 
-function* timeout(ms) {
+async function timeout(ms) {
   var to = function (ms, cb) {
     setTimeout(function () { cb(null); }, ms);
   };
-  yield thunkify(to)(ms);
+  await thunkify(to)(ms);
 }
